@@ -4,9 +4,8 @@ from fastapi import FastAPI
 
 app = FastAPI()
 
-# Render Environment Variables ထဲမှာ ထည့်ထားတဲ့ Token နဲ့ ID ကို ယူသုံးမယ်
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
-DATABASE_ID = os.environ.get("DB_ID_3") # Order Line Items Database ID ဖြစ်ရပါမယ်
+DATABASE_ID = os.environ.get("DB_ID_3") 
 
 notion = Client(auth=NOTION_TOKEN)
 
@@ -20,28 +19,21 @@ def add_item(name: str = "Cola", qty: int = 1, price: int = 1000):
         notion.pages.create(
             parent={"database_id": DATABASE_ID},
             properties={
-                # Aa Line Item ဆိုတဲ့ Column အတွက် (Title type)
+                # Aa Symbol ပါတဲ့ Column နာမည် (Title Type)
                 "Line Item": {
-                    "title": [
-                        {
-                            "text": {
-                                "content": name
-                            }
-                        }
-                    ]
+                    "title": [{"text": {"content": name}}]
                 },
-                # Quantity ဆိုတဲ့ Column အတွက် (Number type)
+                # # Symbol ပါတဲ့ Column နာမည် (Number Type)
                 "Quantity": {
                     "number": qty
                 },
-                # Unit Selling Price (သို့မဟုတ်) Selling Price နာမည်ကို Notion မှာ ပြန်စစ်ပါ
-                # Screenshot အရ 'Selling Price' လို့ ယူဆပြီး ရေးထားပါတယ်
-                "Selling Price": {
+                # # Symbol ပါတဲ့ Column နာမည် (Number Type)
+                # Screenshot အရ 'Unit Selling Price' လို့ တွေ့ရပါတယ်
+                "Unit Selling Price": {
                     "number": price
                 }
             }
         )
         return {"message": f"Success! {name} added to Notion."}
     except Exception as e:
-        # Error တက်ရင် ဘာကြောင့်လဲဆိုတာ မြင်ရအောင် ပြန်ပြပေးမယ်
         return {"error": str(e)}
