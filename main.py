@@ -4,9 +4,9 @@ from fastapi import FastAPI
 
 app = FastAPI()
 
-# Render Environment Variables ကနေ ဖတ်မယ်
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
-DATABASE_ID = os.environ.get("LINE_ITEMS_DB_ID")
+# Line Items DB ID ကို သုံးပါ (DB_ID_3 လို့ မှတ်ခဲ့တာ)
+DATABASE_ID = os.environ.get("DB_ID_3") 
 
 notion = Client(auth=NOTION_TOKEN)
 
@@ -14,8 +14,9 @@ notion = Client(auth=NOTION_TOKEN)
 def read_root():
     return {"status": "Randy's POS is Online"}
 
-@app.post("/add-item")
-def add_item(name: str, qty: int, price: int):
+# POST ကို GET ပြောင်းလိုက်မှ Browser ကနေ စမ်းလို့ရမှာပါ
+@app.get("/add-item")
+def add_item(name: str = "Cola", qty: int = 1, price: int = 1000):
     try:
         notion.pages.create(
             parent={"database_id": DATABASE_ID},
@@ -25,6 +26,6 @@ def add_item(name: str, qty: int, price: int):
                 "Unit Price": {"number": price}
             }
         )
-        return {"message": "Success"}
+        return {"message": f"Success! {name} added to Notion."}
     except Exception as e:
         return {"error": str(e)}
