@@ -2,10 +2,10 @@ import os, httpx, json, asyncio, random, string
 from datetime import datetime
 from fastapi import FastAPI
 
-# ဒီစာသားလေးက အရေးကြီးဆုံးပဲ၊ မပါရင် Render မှာ Error တက်တယ်
+# Render က ဒါကို ရှာတာပါ
 app = FastAPI()
 
-# Database IDs
+# Database IDs (Hardcoded for testing)
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 DB_INVENTORY = "d0b70b1aee10479b8a42a9d86c9936bc"
 DB_ORDERS = "ad29c4830862493188d709b3920e6ac5"
@@ -17,25 +17,9 @@ HEADERS = {
     "Notion-Version": "2022-06-28"
 }
 
-def generate_order_id():
-    now = datetime.now().strftime("%d%H%M")
-    suffix = ''.join(random.choices(string.ascii_uppercase + string.digits, k=3))
-    return f"ORD-{now}-{suffix}"
-
-async def create_main_order(client, customer_data):
-    url = "https://api.notion.com/v1/pages"
-    order_id = generate_order_id()
-    payload = {
-        "parent": {"database_id": DB_ORDERS},
-        "properties": {
-            "Order ID": {"title": [{"text": {"content": order_id}}]},
-            "Status": {"select": {"name": "New"}},
-            "Customer Name": {"rich_text": [{"text": {"content": customer_data.get("name", "Customer")}}]},
-            "Phone": {"rich_text": [{"text": {"content": customer_data.get("phone", "N/A")}}]}
-        }
-    }
-    res = await client.post(url, headers=HEADERS, json=payload)
-    return res.json(), order_id
+@app.get("/")
+async def root():
+    return {"status": "Online", "message": "Randy's POS System is Live!"}
 
 async def add_line_item(client, item_name, qty, main_order_id):
     search_url = f"https://api.notion.com/v1/databases/{DB_INVENTORY}/query"
@@ -64,17 +48,28 @@ async def add_line_item(client, item_name, qty, main_order_id):
 async def full_checkout(items_json: str, name: str = "Customer", phone: str = "N/A"):
     async with httpx.AsyncClient() as client:
         try:
-            main_res, display_id = await create_main_order(client, {"name": name, "phone": phone})
-            if "id" not in main_res:
-                return {"status": "Notion Error", "detail": main_res}
-            
+            # ၁။ အော်ဒါအသစ် ဆောက်မယ်
+            url = "https://api.notion.com/v1/pages"
+            order_id = f"ORD-{datetime.now().strftime('%d%H%M')}"
+            order_payload = {
+                "parent": {"database_id": DB_ORDERS},
+                "properties": {
+                    "Order ID": {"title": [{"text": {"content": order_id}}]},
+                    "Customer Name": {"rich_text": [{"text": {"content": name}}]},
+                    "Phone": {"rich_text": [{"text": {"content": phone}}]}
+                }
+            }
+            main_res = await client.post(url, headers=HEADERS, json=order_payload)
+            main_data = main_res.json()
+
+            if "id" not in main_data:
+                return {"status": "Notion Error", "detail": main_data}
+
+            # ၂။ Line Items တွေကို တစ်ခုချင်းစီ ထည့်မယ်
             order_list = json.loads(items_json)
-            tasks = [add_line_item(client, item['name'], item['qty'], main_res["id"]) for item in order_list]
+            tasks = [add_line_item(client, item['name'], item['qty'], main_data["id"]) for item in order_list]
             await asyncio.gather(*tasks)
-            return {"status": "Success", "order_id": display_id}
+
+            return {"status": "Success", "order_id": order_id}
         except Exception as e:
             return {"status": "Error", "msg": str(e)}
-
-@app.get("/")
-async def root():
-    return {"status": "Online"}
