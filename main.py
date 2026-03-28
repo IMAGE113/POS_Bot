@@ -4,22 +4,26 @@ from fastapi import FastAPI
 
 app = FastAPI()
 
+# Render Environment Variables
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
 INVENTORY_DB_ID = os.environ.get("DB_ID_1")
 LINE_ITEMS_DB_ID = os.environ.get("DB_ID_3")
 
-# Version 3.0.0 အတွက် Client သတ်မှတ်ချက်
+# Notion Client ကို Initialize လုပ်မယ်
+# အောက်ကအတိုင်း အတိအကျ ရေးပေးပါ
 notion = Client(auth=NOTION_TOKEN)
 
 @app.get("/")
 def read_root():
-    return {"status": "Randy's POS Version 3.0 Online"}
+    return {"status": "Randy's POS Version 3.1 Live"}
 
 @app.get("/add-item")
-async def add_item(name: str = "Cola", qty: int = 1):
+def add_item(name: str = "Cola", qty: int = 1):
     try:
-        # ၁။ Inventory မှာ ရှာမယ် (Version 3.0 query ပုံစံ)
-        search_res = notion.databases.query(
+        # ၁။ Inventory ထဲမှာ ပစ္စည်းရှာမယ်
+        # .query ကို ရှာမတွေ့မှာစိုးလို့ dictionary ပုံစံနဲ့ စစ်ထုတ်မယ်
+        db_query = getattr(notion.databases, "query")
+        response = db_query(
             database_id=INVENTORY_DB_ID,
             filter={
                 "property": "Product Name",
@@ -27,14 +31,13 @@ async def add_item(name: str = "Cola", qty: int = 1):
             }
         )
         
-        # results ထဲမှာ ဘာမှမရှိရင် error ပြမယ်
-        results = search_res.get("results")
+        results = response.get("results", [])
         if not results:
             return {"error": f"Item '{name}' not found in Inventory."}
             
         item_id = results[0]["id"]
 
-        # ၂။ Order Line Item ထဲကို Relation နဲ့ ဒေတာသွင်းမယ်
+        # ၂။ Order Line Items ထဲကို Relation နဲ့ ဒေတာသွင်းမယ်
         notion.pages.create(
             parent={"database_id": LINE_ITEMS_DB_ID},
             properties={
@@ -43,8 +46,7 @@ async def add_item(name: str = "Cola", qty: int = 1):
                 "Quantity": {"number": qty}
             }
         )
-        return {"message": f"Success! {name} linked to Inventory."}
+        return {"message": f"Success! {name} linked and added."}
         
     except Exception as e:
-        # Error တက်ရင် ဘာကြောင့်လဲဆိုတာကို သေချာထုတ်ပြမယ်
-        return {"error": str(e)}
+        return {"error": f"Technical Error: {str(e)}"}
