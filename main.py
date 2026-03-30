@@ -9,7 +9,7 @@ from fastapi import FastAPI
 app = FastAPI()
 
 # ၂။ Environment Variables
-# မင်း Render မှာ ပေးခဲ့တဲ့ NOTION_API ဆိုတဲ့ နာမည်အတိုင်း ဒီမှာ လှမ်းခေါ်ထားပါတယ်
+# မင်း Render မှာ ပေးခဲ့တဲ့ NOTION_API ဆိုတဲ့ နာမည်အတိုင်း ပြန်ပြင်ထားပါတယ်
 NOTION_API = os.environ.get("NOTION_API")
 DB_INVENTORY = os.environ.get("DB_INVENTORY")
 DB_ORDERS = os.environ.get("DB_ORDERS")
@@ -26,10 +26,28 @@ async def root():
     return {"status": "Online", "message": "Randy's POS System is Ready!"}
 
 async def add_line_item(client, item_name, qty, main_order_id):
-    search_url = f"https://api.notion.com/v1/databases/{DB_INVENTORY}/query"
-    search_res = await client.post(search_url, headers=HEADERS, json={})
-    all_items = search_res.json().get("results", [])
+    # API Limit မထိအောင် 0.1 စက္ကန့် စောင့်ခိုင်းခြင်း
+    await asyncio.sleep(0.1)
     
+    search_url = f"https://api.notion.com/v1/databases/{DB_INVENTORY}/query"
+    
+    # ပစ္စည်းစာရင်း ၁၀၀ ထက်ကျော်သွားရင်လည်း အကုန်ရှာနိုင်အောင် Pagination ထည့်သွင်းခြင်း
+    all_items = []
+    has_more = True
+    start_cursor = None
+    
+    while has_more:
+        query_payload = {}
+        if start_cursor:
+            query_payload["start_cursor"] = start_cursor
+            
+        search_res = await client.post(search_url, headers=HEADERS, json=query_payload)
+        res_data = search_res.json()
+        all_items.extend(res_data.get("results", []))
+        
+        has_more = res_data.get("has_more", False)
+        start_cursor = res_data.get("next_cursor", None)
+
     inventory_id = None
     for item in all_items:
         try:
@@ -60,7 +78,6 @@ async def full_checkout(items_json: str, name: str = "Customer", phone: str = "N
             url = "https://api.notion.com/v1/pages"
             order_id = f"ORD-{datetime.now().strftime('%d%H%M')}"
             
-            # Orders DB မှာ Name, Phone, Address, Payment Method အစုံထည့်မယ်
             order_payload = {
                 "parent": {"database_id": DB_ORDERS},
                 "properties": {
