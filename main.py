@@ -11,6 +11,7 @@ NOTION_API = os.environ.get("NOTION_API")
 DB_INVENTORY = os.environ.get("DB_INVENTORY")
 DB_ORDERS = os.environ.get("DB_ORDERS")
 DB_LINE_ITEMS = os.environ.get("DB_LINE_ITEMS")
+DB_REPORTS = os.environ.get("DB_REPORTS") # 👈 Reports Database ID ထည့်ရန်
 
 HEADERS = {
     "Authorization": f"Bearer {NOTION_API}",
@@ -20,17 +21,48 @@ HEADERS = {
 
 @app.get("/")
 async def root():
-    return {"status": "Online", "message": "Randy's POS System is Fully Fixed!"}
+    return {"status": "Online", "message": "Randy's POS System is fully automated!"}
+
+# Reports DB ထဲက Daily နဲ့ Monthly Page တွေကို နာမည်အတိုင်း ရှာတဲ့ function
+async def get_report_page_ids(client):
+    daily_id = None
+    monthly_id = None
+    
+    if not DB_REPORTS:
+        print("⚠️ [DEBUG] DB_REPORTS ရဲ့ ID ကို Render မှာ မထည့်ရသေးပါ။")
+        return None, None
+        
+    url = f"https://api.notion.com/v1/databases/{DB_REPORTS}/query"
+    try:
+        res = await client.post(url, headers=HEADERS, json={})
+        results = res.json().get("results", [])
+        
+        for page in results:
+            properties = page.get("properties", {})
+            for prop_name, prop_val in properties.items():
+                if prop_val.get("type") == "title":
+                    title_list = prop_val.get("title", [])
+                    if title_list:
+                        title_text = title_list[0].get("plain_text", "").strip()
+                        
+                        # အမည်တူရင် ID ကို ဖြတ်ယူမယ်
+                        if title_text == "Daily Reports":
+                            daily_id = page["id"]
+                        elif title_text == "Monthly Profit":
+                            monthly_id = page["id"]
+                            
+        return daily_id, monthly_id
+    except Exception as e:
+        print(f"❌ [DEBUG] Reports ရှာဖွေရာတွင် Error တက်ပါသည်- {e}")
+        return None, None
 
 async def add_line_item(client, item_name, qty, main_order_id):
     await asyncio.sleep(0.1)
     search_url = f"https://api.notion.com/v1/databases/{DB_INVENTORY}/query"
     
     try:
-        # Inventory ထဲက ပစ္စည်းတွေကို အကုန်ဆွဲထုတ်ခြင်း
         search_res = await client.post(search_url, headers=HEADERS, json={})
-        res_data = search_res.json()
-        all_items = res_data.get("results", [])
+        all_items = search_res.json().get("results", [])
         print(f"🔎 [DEBUG] Inventory ထဲမှာ စုစုပေါင်း ပစ္စည်း {len(all_items)} ခု တွေ့ပါတယ်။")
         
     except Exception as e:
@@ -41,8 +73,6 @@ async def add_line_item(client, item_name, qty, main_order_id):
     for item in all_items:
         try:
             properties = item.get("properties", {})
-            
-            # မင်းရဲ့ ပုံ ၄ အတိုင်း 'Product Name' ကို ဖတ်ခြင်း
             product_name_prop = properties.get("Product Name", {})
             title_list = product_name_prop.get("title", [])
             
@@ -51,7 +81,6 @@ async def add_line_item(client, item_name, qty, main_order_id):
                 
             not_item_name = title_list[0].get("plain_text", "")
             
-            # စာလုံးပေါင်း တိုက်စစ်ခြင်း
             if not_item_name.lower().strip() == item_name.lower().strip():
                 inventory_id = item["id"].replace("-", "")
                 break
@@ -60,8 +89,6 @@ async def add_line_item(client, item_name, qty, main_order_id):
 
     if inventory_id:
         url = "https://api.notion.com/v1/pages"
-        
-        # မင်းရဲ့ ပုံ ၂ အတိုင်း Line Items Database Column တွေနဲ့ ချိန်ညှိခြင်း
         payload = {
             "parent": {"database_id": DB_LINE_ITEMS},
             "properties": {
@@ -83,18 +110,32 @@ async def full_checkout(items_json: str, name: str = "Customer", phone: str = "N
             url = "https://api.notion.com/v1/pages"
             order_id = f"ORD-{datetime.now().strftime('%d%H%M')}"
             
-            # မင်းရဲ့ ပုံ ၃ အတိုင်း Orders Database Column တွေနဲ့ ချိန်ညှိခြင်း
+            # Reports DB ထဲက page ID တွေကို အရင် သွားရှာခိုင်းမယ်
+            daily_id, monthly_id = await get_report_page_ids(client)
+            print(f"🔗 [DEBUG] Auto Reports ရှာဖွေတွေ့ရှိမှု - Daily: {daily_id}, Monthly: {monthly_id}")
+            
+            # Relation ထဲကို ထည့်ဖို့ list ဆောက်မယ်
+            reports_relation = []
+            if daily_id:
+                reports_relation.append({"id": daily_id.replace("-", "")})
+            if monthly_id:
+                reports_relation.append({"id": monthly_id.replace("-", "")})
+            
             order_payload = {
                 "parent": {"database_id": DB_ORDERS},
                 "properties": {
-                    "Order ID": {"title": [{"text": {"content": order_id}}]}, # ဒီမှာ Order ID ဖြစ်သွားပါပြီ
+                    "Order ID": {"title": [{"text": {"content": order_id}}]},
                     "Customer Name": {"rich_text": [{"text": {"content": name}}]},
                     "Phone": {"rich_text": [{"text": {"content": phone}}]},
                     "Address": {"rich_text": [{"text": {"content": address}}]},
                     "Payment Method": {"select": {"name": payment}},
-                    "Status": {"select": {"name": "New"}}
+                    # ၁။ Dashboard မှာ ပေါ်အောင် Pending လို့ ပြောင်းထားပါတယ်
+                    "Status": {"select": {"name": "Pending"}},
+                    # ၂။ Reports (၂) ခုလုံးနဲ့ အော်တို ချိတ်ပေးသွားမှာပါ 
+                    "Reports": {"relation": reports_relation}
                 }
             }
+            
             main_res = await client.post(url, headers=HEADERS, json=order_payload)
             main_data = main_res.json()
 
