@@ -20,7 +20,7 @@ HEADERS = {
 
 @app.get("/")
 async def root():
-    return {"status": "Online", "message": "Randy's POS System is Fully Fixed!"}
+    return {"status": "Online", "message": "Randy's POS System is Fully Optimized!"}
 
 async def add_line_item(client, item_name, qty, main_order_id):
     await asyncio.sleep(0.1)
@@ -43,53 +43,65 @@ async def add_line_item(client, item_name, qty, main_order_id):
         has_more = res_data.get("has_more", False)
         start_cursor = res_data.get("next_cursor", None)
 
-    print(f"🔎 [DEBUG] Inventory ထဲမှာ စုစုပေါင်း ပစ္စည်း {len(all_items)} ခု တွေ့ပါတယ်။")
-
     inventory_id = None
     for item in all_items:
         try:
             properties = item.get("properties", {})
             product_name_prop = properties.get("Product Name", {})
             
-            # ၁။ အကယ်၍ Column နာမည် မှားနေရင် သို့မဟုတ် ဒေတာမရှိရင် ကျော်သွားရန်
             if not product_name_prop:
                 continue
                 
             title_list = product_name_prop.get("title", [])
-            
-            # ၂။ Row အလွတ်ဖြစ်နေရင် (စာသားမရှိရင်) ကျော်သွားရန် (ဒီအကွက်က အဓိက အသက်ပါ)
             if not title_list or len(title_list) == 0:
                 continue
                 
             not_item_name = title_list[0].get("plain_text", "")
             
-            print(f"👀 [DEBUG] စစ်ဆေးနေသည်- '{not_item_name}' (မင်းရှာတာက- '{item_name}')")
-            
-            # ၃။ စာလုံးပေါင်း တိုက်စစ်ခြင်း
             if not_item_name.lower().strip() == item_name.lower().strip():
-                inventory_id = item["id"]
-                print(f"🎯 [DEBUG] '{item_name}' ကို ရှာတွေ့ပါပြီ! ID: {inventory_id}")
+                # ID ထဲက မျဉ်းစောင်းများကို ဖြုတ်ခြင်း
+                inventory_id = item["id"].replace("-", "")
                 break
         except Exception as e:
-            print(f"❌ [DEBUG] Error တက်သွားသော်လည်း ဆက်လက်ရှာဖွေနေပါသည်- {e}")
             continue
 
-    # ၄။ ပစ္စည်းရှာတွေ့မှသာ Line Item ဆောက်ခြင်း
     if inventory_id:
         url = "https://api.notion.com/v1/pages"
+        
+        clean_main_order_id = main_order_id.replace("-", "")
+        
+        # Notion API အတွက် အတိကျဆုံး Structure ဖြင့် ပြင်ဆင်ခြင်း
         payload = {
             "parent": {"database_id": DB_LINE_ITEMS},
             "properties": {
-                "Line Item": {"title": [{"text": {"content": f"Sale: {item_name}"}}]},
-                "Item": {"relation": [{"id": inventory_id}]}, 
-                "Quantity": {"number": int(qty)},
-                "Orders": {"relation": [{"id": main_order_id}]}
+                "Line Item": {
+                    "title": [
+                        {"text": {"content": f"Sale: {item_name}"}}
+                    ]
+                },
+                "Item": {
+                    "relation": [
+                        {"id": inventory_id}
+                    ]
+                }, 
+                "Quantity": {
+                    "number": int(qty)
+                },
+                "Orders": {
+                    "relation": [
+                        {"id": clean_main_order_id}
+                    ]
+                }
             }
         }
+        
+        # API ရဲ့ တုံ့ပြန်မှုကို စောင့်ကြည့်ရန်
         res = await client.post(url, headers=HEADERS, json=payload)
-        print(f"📝 [DEBUG] Line Item အသစ်ဆောက်သည့် ရလဒ်- {res.status_code}")
+        print(f"📡 [DEBUG] Notion Create Page Status: {res.status_code}")
+        if res.status_code != 200:
+            print(f"📡 [DEBUG] Notion Error Detail: {res.text}")
     else:
-        print(f"❌ [DEBUG] '{item_name}' ကို Inventory ထဲမှာ ရှာမတွေ့တဲ့အတွက် Line Item မဆောက်ဖြစ်လိုက်ပါဘူး။")
+        print(f"❌ [DEBUG] '{item_name}' ကို Inventory ထဲမှာ ရှာမတွေ့ပါ။")
 
 @app.get("/full-checkout")
 async def full_checkout(items_json: str, name: str = "Customer", phone: str = "N/A", address: str = "N/A", payment: str = "COD"):
