@@ -5,11 +5,8 @@ import asyncio
 from datetime import datetime
 from fastapi import FastAPI
 
-# ၁။ FastAPI App Setup
 app = FastAPI()
 
-# ၂။ Environment Variables
-# မင်း Render မှာ ပေးခဲ့တဲ့ NOTION_API ဆိုတဲ့ နာမည်အတိုင်း ပြန်ပြင်ထားပါတယ်
 NOTION_API = os.environ.get("NOTION_API")
 DB_INVENTORY = os.environ.get("DB_INVENTORY")
 DB_ORDERS = os.environ.get("DB_ORDERS")
@@ -23,15 +20,13 @@ HEADERS = {
 
 @app.get("/")
 async def root():
-    return {"status": "Online", "message": "Randy's POS System is Ready!"}
+    return {"status": "Online", "message": "Randy's POS System is Fully Fixed!"}
 
 async def add_line_item(client, item_name, qty, main_order_id):
-    # API Limit မထိအောင် 0.1 စက္ကန့် စောင့်ခိုင်းခြင်း
     await asyncio.sleep(0.1)
     
     search_url = f"https://api.notion.com/v1/databases/{DB_INVENTORY}/query"
     
-    # ပစ္စည်းစာရင်း ၁၀၀ ထက်ကျော်သွားရင်လည်း အကုန်ရှာနိုင်အောင် Pagination ထည့်သွင်းခြင်း
     all_items = []
     has_more = True
     start_cursor = None
@@ -48,16 +43,38 @@ async def add_line_item(client, item_name, qty, main_order_id):
         has_more = res_data.get("has_more", False)
         start_cursor = res_data.get("next_cursor", None)
 
+    print(f"🔎 [DEBUG] Inventory ထဲမှာ စုစုပေါင်း ပစ္စည်း {len(all_items)} ခု တွေ့ပါတယ်။")
+
     inventory_id = None
     for item in all_items:
         try:
-            not_item_name = item["properties"]["Product Name"]["title"][0]["plain_text"]
+            properties = item.get("properties", {})
+            product_name_prop = properties.get("Product Name", {})
+            
+            # ၁။ အကယ်၍ Column နာမည် မှားနေရင် သို့မဟုတ် ဒေတာမရှိရင် ကျော်သွားရန်
+            if not product_name_prop:
+                continue
+                
+            title_list = product_name_prop.get("title", [])
+            
+            # ၂။ Row အလွတ်ဖြစ်နေရင် (စာသားမရှိရင်) ကျော်သွားရန် (ဒီအကွက်က အဓိက အသက်ပါ)
+            if not title_list or len(title_list) == 0:
+                continue
+                
+            not_item_name = title_list[0].get("plain_text", "")
+            
+            print(f"👀 [DEBUG] စစ်ဆေးနေသည်- '{not_item_name}' (မင်းရှာတာက- '{item_name}')")
+            
+            # ၃။ စာလုံးပေါင်း တိုက်စစ်ခြင်း
             if not_item_name.lower().strip() == item_name.lower().strip():
                 inventory_id = item["id"]
+                print(f"🎯 [DEBUG] '{item_name}' ကို ရှာတွေ့ပါပြီ! ID: {inventory_id}")
                 break
-        except:
+        except Exception as e:
+            print(f"❌ [DEBUG] Error တက်သွားသော်လည်း ဆက်လက်ရှာဖွေနေပါသည်- {e}")
             continue
 
+    # ၄။ ပစ္စည်းရှာတွေ့မှသာ Line Item ဆောက်ခြင်း
     if inventory_id:
         url = "https://api.notion.com/v1/pages"
         payload = {
@@ -69,7 +86,10 @@ async def add_line_item(client, item_name, qty, main_order_id):
                 "Orders": {"relation": [{"id": main_order_id}]}
             }
         }
-        await client.post(url, headers=HEADERS, json=payload)
+        res = await client.post(url, headers=HEADERS, json=payload)
+        print(f"📝 [DEBUG] Line Item အသစ်ဆောက်သည့် ရလဒ်- {res.status_code}")
+    else:
+        print(f"❌ [DEBUG] '{item_name}' ကို Inventory ထဲမှာ ရှာမတွေ့တဲ့အတွက် Line Item မဆောက်ဖြစ်လိုက်ပါဘူး။")
 
 @app.get("/full-checkout")
 async def full_checkout(items_json: str, name: str = "Customer", phone: str = "N/A", address: str = "N/A", payment: str = "COD"):
@@ -93,7 +113,10 @@ async def full_checkout(items_json: str, name: str = "Customer", phone: str = "N
             main_data = main_res.json()
 
             if "id" not in main_data:
+                print(f"❌ [DEBUG] Main Order ဆောက်တာ မအောင်မြင်ပါ- {main_data}")
                 return {"status": "Notion Error", "detail": main_data}
+
+            print(f"🎉 [DEBUG] Main Order အောင်မြင်စွာ ဆောက်ပြီးပါပြီ။ ID: {main_data['id']}")
 
             order_list = json.loads(items_json)
             tasks = [add_line_item(client, item['name'], item['qty'], main_data["id"]) for item in order_list]
@@ -101,4 +124,5 @@ async def full_checkout(items_json: str, name: str = "Customer", phone: str = "N
 
             return {"status": "Success", "order_id": order_id}
         except Exception as e:
+            print(f"❌ [DEBUG] Checkout တစ်ခုလုံးမှာ Error တက်သွားပါတယ်- {e}")
             return {"status": "Error", "msg": str(e)}
