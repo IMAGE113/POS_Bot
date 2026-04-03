@@ -206,7 +206,7 @@ async def sync_notion():
                                                 "Line Item": {"title": [{"text": {"content": detail["name"]}}]},
                                                 "Quantity": {"number": int(item.get("qty", 1))},
                                                 "Item": {"relation": [{"id": detail["id"].replace("-", "")}]},
-                                                "Orders": {"relation": [{"id": order_data["id"].replace("-", "")]}
+                                                "Orders": {"relation": [{"id": order_data["id"].replace("-", "")}]}
                                             }
                                         }
                                     )
