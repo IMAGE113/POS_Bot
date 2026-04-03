@@ -205,7 +205,7 @@ async def sync_notion():
                                             "properties": {
                                                 "Line Item": {"title": [{"text": {"content": detail["name"]}}]},
                                                 "Quantity": {"number": int(item.get("qty", 1))},
-                                                "Item": {"relation": [{"id": detail["id"].replace("-", "")]},
+                                                "Item": {"relation": [{"id": detail["id"].replace("-", "")}]},
                                                 "Orders": {"relation": [{"id": order_data["id"].replace("-", "")]}
                                             }
                                         }
@@ -236,7 +236,7 @@ Tools: get_item, save_order, cancel_order
 def get_or_create_chat(chat_id: str):
     if chat_id not in user_sessions:
         user_sessions[chat_id] = ai_client.chats.create(
-            model="gemini-1.5-turbo",
+            model="gemini-1.5-flash",
             config=types.GenerateContentConfig(
                 system_instruction=get_system_prompt(),
                 tools=[get_item, save_order, cancel_order],
