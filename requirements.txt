@@ -1,5 +1,6 @@
 fastapi
 uvicorn
-httpx
-google-genai
 python-dotenv
+httpx
+aiosqlite
+google-genai
