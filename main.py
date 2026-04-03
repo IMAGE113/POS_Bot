@@ -22,6 +22,7 @@ DB_LINE_ITEMS = os.environ.get("DB_LINE_ITEMS")
 DB_REPORTS = os.environ.get("DB_REPORTS")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 
 HEADERS = {
     "Authorization": f"Bearer {NOTION_API}",
@@ -56,7 +57,22 @@ init_sqlite_db()
 
 # --- Functions (Tools) for AI ---
 
+async def send_noti_to_admin(message_text: str):
+    """Admin ဆီသို့ Telegram မက်ဆေ့ခ်ျ လှမ်းပို့ပေးသည်"""
+    if TELEGRAM_BOT_TOKEN and ADMIN_CHAT_ID:
+        telegram_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        async with httpx.AsyncClient() as client:
+            try:
+                await client.post(telegram_url, json={
+                    "chat_id": ADMIN_CHAT_ID,
+                    "text": message_text
+                })
+                print("✔️ Notification sent to Admin!")
+            except Exception as e:
+                print(f"❌ Failed to send admin noti: {e}")
+
 async def get_inventory_item(item_name_or_code: str):
+    """Notion DB ထဲမှာ ပစ္စည်းအမည် သို့မဟုတ် Code နဲ့ ရှာဖွေပြီး Stock စစ်ပေးသည်"""
     async with httpx.AsyncClient() as client:
         url = f"https://api.notion.com/v1/databases/{DB_INVENTORY}/query"
         try:
@@ -85,7 +101,6 @@ async def get_inventory_item(item_name_or_code: str):
             return {"found": False}
         except Exception:
             return {"found": False}
-
 
 async def process_sync_to_notion():
     """SQLite ထဲက ပို့ရန်ကျန်နေသော အော်ဒါများကို Notion ဆီ ပို့ပေးသည်"""
@@ -142,13 +157,16 @@ async def process_sync_to_notion():
                     cursor.execute("UPDATE orders_queue SET sync_status = 'completed' WHERE id = ?", (db_id,))
                     conn.commit()
                     print(f"✔️ Synced Order {order_id} to Notion!")
+                    
+                    # Admin ဆီ Noti လှမ်းပို့ခြင်း
+                    await send_noti_to_admin(f"🚀 [Prepaid] အော်ဒါအသစ် Notion သို့ ရောက်ရှိသွားပါပြီ!\nOrder ID: {order_id}\nCustomer: {customer_name}")
+                    
                     await asyncio.sleep(1) # Rate limit အတွက်
                     
             except Exception as e:
                 print(f"❌ Sync Error for ID {db_id}: {e}")
                 
     conn.close()
-
 
 async def create_final_order(customer_name: str, items_json: str, payment: str = "COD"):
     """အော်ဒါကို SQLite ထဲ အရင် သိမ်းလိုက်ပါသည်"""
@@ -168,6 +186,57 @@ async def create_final_order(customer_name: str, items_json: str, payment: str =
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+async def cancel_order(order_id: str):
+    """Notion DB ထဲမှာ Order ID ကို ရှာပြီး Pending ဖြစ်မှသာ Status ကို Cancelled ဟု ပြောင်းပေးသည်"""
+    async with httpx.AsyncClient() as client:
+        query_url = f"https://api.notion.com/v1/databases/{DB_ORDERS}/query"
+        filter_payload = {
+            "filter": {
+                "property": "Order ID",
+                "title": {
+                    "equals": order_id
+                }
+            }
+        }
+        
+        try:
+            res = await client.post(query_url, headers=HEADERS, json=filter_payload)
+            results = res.json().get("results", [])
+            
+            if not results:
+                return {"status": "not_found", "message": "Order ID ရှာမတွေ့ပါ။"}
+                
+            page_id = results[0]["id"]
+            props = results[0]["properties"]
+            
+            # Status က Pending ဟုတ်မဟုတ် စစ်မယ်
+            current_status = props.get("Status", {}).get("select", {}).get("name", "")
+            
+            if current_status != "Pending":
+                return {
+                    "status": "not_allowed", 
+                    "message": f"လက်ရှိ Order မှာ Status သည် '{current_status}' ဖြစ်နေသဖြင့် Bot မှ ပယ်ဖျက်၍ မရနိုင်ပါ။ Admin ကို တိုက်ရိုက် ဆက်သွယ်ပေးပါ။"
+                }
+            
+            # Pending ဖြစ်နေရင် Cancelled လို့ Update လုပ်မယ်
+            update_url = f"https://api.notion.com/v1/pages/{page_id}"
+            update_payload = {
+                "properties": {
+                    "Status": {"select": {"name": "Cancelled"}}
+                }
+            }
+            
+            update_res = await client.patch(update_url, headers=HEADERS, json=update_payload)
+            
+            if update_res.status_code == 200:
+                # Admin ထံ Noti ပို့ခြင်း
+                await send_noti_to_admin(f"⚠️ သတိပေးချက်: Customer မှ Order ID: {order_id} ကို Cancel လိုက်ပါပြီ။")
+                return {"status": "success", "message": f"Order {order_id} ကို အောင်မြင်စွာ ပယ်ဖျက်ပြီးပါပြီ။"}
+            else:
+                return {"status": "error", "message": "Notion တွင် ပြင်ဆင်ရန် ခေတ္တ အဆင်မပြေဖြစ်နေပါသည်။"}
+                
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
 
 # --- Webhook Endpoint for Telegram ---
 
@@ -184,11 +253,12 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
             contents=user_text,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
-                tools=[get_inventory_item, create_final_order],
+                tools=[get_inventory_item, create_final_order, cancel_order], 
                 temperature=0.7,
             ),
         )
         
+        # AI က Function ခေါ်ခိုင်းရင်
         if response.function_calls:
             for call in response.function_calls:
                 if call.name == "get_inventory_item":
@@ -199,10 +269,21 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
                     args = call.args
                     result = await create_final_order(args["customer_name"], args["items_json"], args.get("payment", "COD"))
                     
+                    # အော်ဒါသိမ်းတာ အောင်မြင်ရင်
                     if result["status"] == "success":
-                        background_tasks.add_task(process_sync_to_notion)
+                        # Prepaid ဆိုရင် Notion ဆီ လှမ်းပို့မယ်
+                        if args.get("payment", "COD") == "Prepaid":
+                            background_tasks.add_task(process_sync_to_notion)
+                        
+                elif call.name == "cancel_order":
+                    args = call.args
+                    await cancel_order(args["order_id"])
         
         bot_reply = response.text
+        
+        # --- COD အတွက် Admin ဆီ တိုက်ရိုက်လှမ်းပို့ခြင်း ---
+        if bot_reply and "Admin ဆီ ပို့ပေးထားပါတယ်" in bot_reply:
+            await send_noti_to_admin(f"📝 [COD မှာယူမှု အသစ်]\n{user_text}")
         
         # Telegram ဆီ စာပြန်ပို့သည့် အပိုင်း
         if bot_reply and TELEGRAM_BOT_TOKEN:
