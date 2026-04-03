@@ -43,7 +43,11 @@ HEADERS = {
     "Notion-Version": "2022-06-28"
 }
 
-ai_client = genai.Client(api_key=GEMINI_API_KEY)
+# 🛠️ v1beta အစား v1 ကို အတင်းသုံးခိုင်းဖို့ ဖြည့်စွက်ထားပါတယ်
+ai_client = genai.Client(
+    api_key=GEMINI_API_KEY,
+    http_options={'api_version': 'v1'}
+)
 
 # -------------------- GLOBALS --------------------
 CURRENT_MENU_LIST = []
