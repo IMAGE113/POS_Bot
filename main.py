@@ -9,11 +9,12 @@ from dotenv import load_dotenv
 import httpx
 import aiosqlite
 from google import genai
+from google.genai import types # 🛠️ Config တွေအတွက် types ကို ပြန်သုံးထားပါတယ်
 
 # -------------------- SETUP --------------------
 load_dotenv()
 
-# 🛠️ FastAPI ရဲ့ Startup/Shutdown အတွက် Lifespan အသစ်
+# 🛠️ FastAPI ရဲ့ Startup/Shutdown အတွက် Lifespan
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup လုပ်ငန်းစဉ်များ
@@ -252,16 +253,16 @@ Rule: When users ask for an item in Burmese, match it with the closest available
 Tools: get_item, save_order, cancel_order
 """
 
-# 🛠️ ပိုစိတ်ချရစေရန် types.ChatConfig အစား Python Dictionary သက်သက်ဖြင့် ပြင်ဆင်ထားပါသည်
+# 🛠️ types.GenerateContentConfig ကို အသုံးပြု၍ Chat Session ဖန်တီးခြင်း
 def get_or_create_chat(chat_id: str):
     if chat_id not in user_sessions:
         user_sessions[chat_id] = ai_client.chats.create(
             model="gemini-1.5-flash",
-            config={
-                "system_instruction": get_system_prompt(),
-                "tools": [get_item, save_order, cancel_order],
-                "temperature": 0.7
-            }
+            config=types.GenerateContentConfig(
+                system_instruction=get_system_prompt(),
+                tools=[get_item, save_order, cancel_order],
+                temperature=0.7
+            )
         )
     return user_sessions[chat_id]
 
@@ -298,43 +299,4 @@ async def webhook(req: Request, bg: BackgroundTasks):
             for call in response.function_calls:
                 result = {"status": "error", "message": "Unknown error"}
                 try:
-                    args = call.args or {}
-                    if call.name == "get_item":
-                        result = await get_item(args.get("name", ""))
-                    elif call.name == "save_order":
-                        result = await save_order(
-                            args.get("name", ""),
-                            args.get("items", "[]"),
-                            args.get("payment", "COD")
-                        )
-                        if result.get("status") == "saved":
-                            reset_session(str(chat_id))
-                            bg.add_task(sync_notion)
-                    elif call.name == "cancel_order":
-                        result = await cancel_order(args.get("order_id", ""), str(chat_id))
-                except Exception as e:
-                    logging.error(f"Function call error ({call.name}): {e}")
-                    result = {"status": "error", "message": str(e)}
-                
-                # Function response ပို့တဲ့ ပုံစံအသစ်
-                function_responses.append({
-                    "function_response": {
-                        "name": call.name,
-                        "response": {"result": result}
-                    }
-                })
-            
-            response = chat.send_message(function_responses)
-
-        reply = response.text or "⚠️ တောင်းပန်ပါတယ်ရှင့်၊ အခုလုပ်ဆောင်နိုင်သေးတာ မဟုတ်လို့ပါနော်။"
-    except Exception as e:
-        logging.error(f"AI error for chat {chat_id}: {e}")
-        reply = "❌ ဆာဗာအမှားအယွင်း ရှိနေပါတယ်ရှင်၊ ခဏလေး စောင့်ပေးပါဦးနော်။"
-
-    await send_telegram(str(chat_id), reply)
-    return {"ok": True}
-
-# -------------------- RUN --------------------
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=PORT)
+                    args = call.args or
