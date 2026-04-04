@@ -4,34 +4,19 @@ import asyncio
 import logging
 from datetime import datetime
 from contextlib import asynccontextmanager
+from difflib import get_close_matches
+
 from fastapi import FastAPI, Request, BackgroundTasks
 from dotenv import load_dotenv
 import httpx
 import aiosqlite
-from google import genai
-from google.genai import types # 🛠️ Config တွေအတွက် types ကို ပြန်သုံးထားပါတယ်
 
-# -------------------- SETUP --------------------
+from google import genai
+from google.genai import types
+
+# -------------------- LOAD ENV --------------------
 load_dotenv()
 
-# 🛠️ FastAPI ရဲ့ Startup/Shutdown အတွက် Lifespan
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup လုပ်ငန်းစဉ်များ
-    await init_db()
-    asyncio.create_task(telegram_worker())
-    asyncio.create_task(periodic_menu_refresh())
-    await update_menu_cache()
-    logging.info("✅ Server started and menu cache updated.")
-    
-    yield # ဒီနေရာမှာ Server က ပုံမှန်အလုပ်လုပ်နေမှာပါ
-    
-    logging.info("🛑 Server is shutting down.")
-
-app = FastAPI(lifespan=lifespan)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-
-# -------------------- ENV VARIABLES --------------------
 NOTION_API = os.getenv("NOTION_API")
 DB_INVENTORY = os.getenv("DB_INVENTORY")
 DB_ORDERS = os.getenv("DB_ORDERS")
@@ -41,17 +26,17 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 PORT = int(os.getenv("PORT", 10000))
 
-required_envs = [
-    ("NOTION_API", NOTION_API),
-    ("DB_INVENTORY", DB_INVENTORY),
-    ("DB_ORDERS", DB_ORDERS),
-    ("DB_LINE_ITEMS", DB_LINE_ITEMS),
-    ("GEMINI_API_KEY", GEMINI_API_KEY),
-]
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-for name, value in required_envs:
-    if not value:
-        logging.warning(f"⚠️ ENV variable {name} not set. The app may not work properly.")
+def extract_notion_id(url_or_id: str) -> str:
+    if not url_or_id:
+        return ""
+    clean_id = url_or_id.split("/")[-1].split("?")[0]
+    return clean_id.replace("-", "")
+
+NOTION_DB_INVENTORY = extract_notion_id(DB_INVENTORY)
+NOTION_DB_ORDERS = extract_notion_id(DB_ORDERS)
+NOTION_DB_LINE_ITEMS = extract_notion_id(DB_LINE_ITEMS)
 
 HEADERS = {
     "Authorization": f"Bearer {NOTION_API}",
@@ -59,19 +44,98 @@ HEADERS = {
     "Notion-Version": "2022-06-28"
 }
 
-# 🛠️ Google GenAI Client
-ai_client = genai.Client(
-    api_key=GEMINI_API_KEY,
-    http_options={'api_version': 'v1'}
-)
-
 # -------------------- GLOBALS --------------------
-CURRENT_MENU_LIST = []
-user_sessions = {}
-telegram_queue = asyncio.Queue()
 DB_FILE = "pos.db"
+telegram_queue = asyncio.Queue(maxsize=500)
+CURRENT_MENU = []
+MENU_CACHE = {}
+user_sessions = {}
 
-# -------------------- SQLITE ASYNC --------------------
+# -------------------- AI --------------------
+ai_client = genai.Client(api_key=GEMINI_API_KEY)
+
+def system_prompt():
+    menu_str = ", ".join(CURRENT_MENU) if CURRENT_MENU else "No menu yet"
+    return f"""
+You are a friendly cafe assistant named 'Randy's Cafe' (Burmese speaking).
+Be natural, short, and helpful. Use polite particles like "ရှင်" or "နော်".
+
+Available Menu Items: [{menu_str}]
+
+Important:
+- The AI Burmese→English menu mapping is already handled by a hard-coded prompt.
+- Use the `get_item` tool ONLY to check stock for the English item names received from the hard prompt.
+- Respond politely in Burmese with stock quantity.
+
+Tools: get_item, save_order, cancel_order
+"""
+
+# -------------------- MENU & ITEMS --------------------
+async def get_item(name: str):
+    """
+    Menu cache မှာ stock quantity ပြောပေးမယ်။
+    """
+    name_lower = name.lower()
+    
+    # ၁။ Direct Match ရှာမယ်
+    if name_lower in MENU_CACHE:
+        item = MENU_CACHE[name_lower]
+        return {
+            "found": True,
+            "name": item["name"],
+            "id": item["id"],
+            "stock": item["stock"],
+            "message": f"{item['name']} က stock {item['stock']} လက်ကျန်ရှိပါတယ်ရှင်"
+        }
+    
+    # ၂။ မတွေ့ရင် အနီးစပ်ဆုံး ရှာမယ်
+    menu_keys = list(MENU_CACHE.keys())
+    matches = get_close_matches(name_lower, menu_keys, n=1, cutoff=0.7)
+    if matches:
+        matched_key = matches[0]
+        item = MENU_CACHE[matched_key]
+        return {
+            "found": True,
+            "name": item["name"],
+            "id": item["id"],
+            "stock": item["stock"],
+            "message": f"{item['name']} က stock {item['stock']} လက်ကျန်ရှိပါတယ်ရှင်"
+        }
+        
+    return {"found": False, "message": f"မတွေ့ပါဘူးရှင်: {name}"}
+
+async def refresh_menu():
+    global CURRENT_MENU, MENU_CACHE
+    if not NOTION_DB_INVENTORY:
+        logging.error("❌ DB_INVENTORY not set!")
+        return
+        
+    url = f"https://api.notion.com/v1/databases/{NOTION_DB_INVENTORY}/query"
+    async with httpx.AsyncClient(timeout=15) as client:
+        try:
+            res = await client.post(url, headers=HEADERS)
+            res.raise_for_status()
+            data = res.json()
+        except Exception as e:
+            logging.error(f"Failed to fetch menu from Notion: {e}")
+            return
+
+    new_menu = []
+    new_cache = {}
+    for item in data.get("results", []):
+        props = item["properties"]
+        name_prop = props.get("Product Name", {}).get("title", [])
+        name = name_prop[0]["plain_text"] if name_prop else ""
+        stock = props.get("Stock Quantity", {}).get("number", 0)
+        if name:
+            new_menu.append(name)
+            new_cache[name.lower()] = {"id": item["id"], "name": name, "stock": stock}
+
+    CURRENT_MENU = new_menu
+    MENU_CACHE = new_cache
+    logging.info(f"Menu loaded: {len(CURRENT_MENU)} items")
+
+# -------------------- DATABASE --------------------
 async def init_db():
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("""
@@ -87,65 +151,26 @@ async def init_db():
         await db.commit()
 
 # -------------------- TELEGRAM --------------------
-async def send_telegram(chat_id: str, text: str):
-    if not TELEGRAM_BOT_TOKEN:
-        return
-    await telegram_queue.put((chat_id, text))
-
 async def telegram_worker():
     async with httpx.AsyncClient(timeout=10) as client:
         while True:
             chat_id, text = await telegram_queue.get()
             try:
-                await client.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                                  json={"chat_id": chat_id, "text": text})
+                await client.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": chat_id, "text": text}
+                )
             except Exception as e:
-                logging.error(f"Telegram send error: {e}")
-            await asyncio.sleep(1)
+                logging.error(f"Telegram error: {e}")
+            await asyncio.sleep(0.5)
+
+async def send(chat_id: str, text: str):
+    if TELEGRAM_BOT_TOKEN:
+        await telegram_queue.put((chat_id, text))
 
 async def send_admin(text: str):
-    if TELEGRAM_BOT_TOKEN and ADMIN_CHAT_ID:
-        await send_telegram(ADMIN_CHAT_ID, text)
-    else:
-        logging.info(f"[ADMIN] {text}")
-
-# -------------------- MENU & NOTION --------------------
-async def notion_post_with_retry(url, json_body, retries=3):
-    async with httpx.AsyncClient(timeout=10) as client:
-        for attempt in range(retries):
-            try:
-                res = await client.post(url, headers=HEADERS, json=json_body)
-                res.raise_for_status()
-                return res.json()
-            except Exception as e:
-                logging.warning(f"Notion API attempt {attempt+1} failed: {e}")
-                await asyncio.sleep(1 + attempt*2)
-        return {}
-
-async def update_menu_cache():
-    global CURRENT_MENU_LIST
-    url = f"https://api.notion.com/v1/databases/{DB_INVENTORY}/query"
-    data = await notion_post_with_retry(url, {})
-    results = data.get("results", [])
-    new_menu = []
-    for i in results:
-        title = i["properties"].get("Product Name", {}).get("title", [])
-        item_name = title[0]["plain_text"] if title else ""
-        if item_name:
-            new_menu.append(item_name)
-    CURRENT_MENU_LIST = new_menu
-    logging.info(f"Menu Cache Updated: {CURRENT_MENU_LIST}")
-
-async def get_item(name: str):
-    url = f"https://api.notion.com/v1/databases/{DB_INVENTORY}/query"
-    data = await notion_post_with_retry(url, {})
-    for i in data.get("results", []):
-        title = i["properties"].get("Product Name", {}).get("title", [])
-        item_name = title[0]["plain_text"] if title else ""
-        if name.lower() in item_name.lower():
-            stock = i["properties"].get("Stock Quantity", {}).get("number") or 0
-            return {"found": True, "name": item_name, "stock": stock, "id": i["id"]}
-    return {"found": False, "message": "ပစ္စည်းမတွေ့ပါဘူးရှင်။"}
+    if ADMIN_CHAT_ID:
+        await send(ADMIN_CHAT_ID, text)
 
 # -------------------- ORDERS --------------------
 async def save_order(name: str, items: str, payment: str = "COD"):
@@ -156,147 +181,185 @@ async def save_order(name: str, items: str, payment: str = "COD"):
                 (name, items, payment, datetime.now().isoformat())
             )
             await db.commit()
-        return {"status": "saved", "customer": name}
+        return {"status": "saved"}
     except Exception as e:
+        logging.error(f"Save order error: {e}")
         return {"status": "error", "message": str(e)}
 
 async def cancel_order(order_id: str, chat_id: str):
-    url = f"https://api.notion.com/v1/databases/{DB_ORDERS}/query"
-    data = await notion_post_with_retry(url, {
-        "filter": {"property": "Order ID", "title": {"equals": order_id}}
-    })
-    results = data.get("results", [])
-    if not results:
-        return {"status": "not_found", "message": "အော်ဒါနံပါတ် ရှာမတွေ့ပါဘူးရှင်။"}
-    page = results[0]
-    page_id = page["id"]
-    status = page["properties"].get("Status", {}).get("select", {}).get("name", "")
-    
-    if status == "Pending":
-        async with httpx.AsyncClient() as client:
-            await client.patch(
-                f"https://api.notion.com/v1/pages/{page_id}", 
-                headers=HEADERS,
-                json={"properties": {"Status": {"select": {"name": "Cancelled"}}}}
-            )
-        return {"status": "cancelled", "message": f"အော်ဒါ {order_id} ကို အောင်မြင်စွာ ပယ်ဖျက်ပေးပြီးပါပြီရှင်။"}
-    
-    elif status == "Processing":
-        await send_admin(f"🔔 ယူဆာ {chat_id} က အော်ဒါ {order_id} (Processing) ကို ဖျက်ချင်နေပါတယ်။")
-        return {"status": "processing", "message": "အော်ဒါက ပြင်ဆင်နေတဲ့ အဆင့်ရောက်နေလို့ Admin ကို အကြောင်းကြားထားပါတယ်။"}
-    
-    else:
-        return {"status": "other", "message": f"ဒီအော်ဒါက {status} အခြေအနေ ဖြစ်နေလို့ ဖျက်ပေးလို့ မရနိုင်တော့ပါဘူးရှင်။"}
-
-# -------------------- SYNC --------------------
-async def sync_notion():
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("SELECT id, customer_name, items_json, payment FROM orders_queue WHERE sync_status='pending'") as cursor:
-            rows = await cursor.fetchall()
-            if not rows:
-                return
-            async with httpx.AsyncClient(timeout=10) as client:
-                for r in rows:
-                    oid, name, items_json, payment = r
-                    order_id = f"ORD-{oid}-{datetime.now().strftime('%H%M')}"
-                    try:
-                        order_data = await notion_post_with_retry(
-                            "https://api.notion.com/v1/pages",
-                            {
-                                "parent": {"database_id": DB_ORDERS},
-                                "properties": {
-                                    "Order ID": {"title": [{"text": {"content": order_id}}]},
-                                    "Customer Name": {"rich_text": [{"text": {"content": name}}]},
-                                    "Payment Method": {"select": {"name": payment}},
-                                    "Status": {"select": {"name": "Pending"}}
-                                }
-                            }
-                        )
-                        if "id" in order_data:
-                            items = json.loads(items_json)
-                            for item in items:
-                                detail = await get_item(item.get("name", ""))
-                                if detail.get("found"):
-                                    await client.post(
-                                        "https://api.notion.com/v1/pages",
-                                        headers=HEADERS,
-                                        json={
-                                            "parent": {"database_id": DB_LINE_ITEMS},
-                                            "properties": {
-                                                "Line Item": {"title": [{"text": {"content": detail["name"]}}]},
-                                                "Quantity": {"number": int(item.get("qty", 1))},
-                                                "Item": {"relation": [{"id": detail["id"].replace("-", "")}]},
-                                                "Orders": {"relation": [{"id": order_data["id"].replace("-", "")}]}
-                                            }
-                                        }
-                                    )
-                            await db.execute("UPDATE orders_queue SET sync_status='done' WHERE id=?", (oid,))
-                            await db.commit()
-                            await send_admin(f"🚀 Order synced: {order_id}")
-                        await asyncio.sleep(1)
-                    except Exception as e:
-                        logging.error(f"Sync error for order {oid}: {e}")
+    await send_admin(f"Cancel request: {order_id} from {chat_id}")
+    return {"status": "requested"}
 
 # -------------------- AI SESSION --------------------
-def get_system_prompt():
-    menu_str = ", ".join(CURRENT_MENU_LIST) if CURRENT_MENU_LIST else "No items fetched yet"
-    return f"""
-You are a smart, polite, and helpful shop assistant for 'Randy's Cafe'.
-- Speak naturally in Burmese as a friendly human (not like a robot). 
-- Use polite particles like "ရှင်" (shin) or "နော်" (naw) where appropriate.
-- Be short, helpful, and focused on assisting the customer with their order or queries.
-
-Available menu items: [{menu_str}]
-
-Rule: When users ask for an item in Burmese, match it with the closest available menu item in English from the list above.
-
-Tools: get_item, save_order, cancel_order
-"""
-
-# 🛠️ types.GenerateContentConfig ကို အသုံးပြု၍ Chat Session ဖန်တီးခြင်း
-def get_or_create_chat(chat_id: str):
+def get_chat(chat_id: str):
     if chat_id not in user_sessions:
+        functions_declaration = [
+            types.Function(
+                name="get_item",
+                description="Check menu item and stock",
+                parameters={"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}
+            ),
+            types.Function(
+                name="save_order",
+                description="Save customer order",
+                parameters={"type":"object","properties":{"name":{"type":"string"},"items":{"type":"string"},"payment":{"type":"string"}},"required":["name","items"]}
+            ),
+            types.Function(
+                name="cancel_order",
+                description="Cancel existing order",
+                parameters={"type":"object","properties":{"order_id":{"type":"string"}},"required":["order_id"]}
+            )
+        ]
+        
         user_sessions[chat_id] = ai_client.chats.create(
             model="gemini-1.5-flash",
             config=types.GenerateContentConfig(
-                system_instruction=get_system_prompt(),
-                tools=[get_item, save_order, cancel_order],
+                system_instruction=system_prompt(),
+                tools=[*functions_declaration, get_item, save_order, cancel_order],
                 temperature=0.7
             )
         )
     return user_sessions[chat_id]
 
-def reset_session(chat_id: str):
-    if chat_id in user_sessions:
-        del user_sessions[chat_id]
+def reset_chat(chat_id: str):
+    user_sessions.pop(chat_id, None)
 
-# -------------------- PERIODIC TASKS --------------------
-async def periodic_menu_refresh(interval=300):
-    while True:
-        await update_menu_cache()
-        await asyncio.sleep(interval)
+# -------------------- SYNC WITH NOTION --------------------
+async def notion_post(url, payload, retries=3):
+    async with httpx.AsyncClient(timeout=15) as client:
+        for i in range(retries):
+            try:
+                res = await client.post(url, headers=HEADERS, json=payload)
+                res.raise_for_status()
+                return res.json()
+            except Exception as e:
+                logging.warning(f"Notion API retry {i+1}: {e}")
+                await asyncio.sleep(2 ** i)
+    return {}
 
-# -------------------- WEBHOOK --------------------
+async def sync_orders():
+    if not NOTION_DB_ORDERS:
+        logging.error("❌ DB_ORDERS not set!")
+        return
+
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("SELECT id, customer_name, items_json, payment FROM orders_queue WHERE sync_status='pending'") as cur:
+            rows = await cur.fetchall()
+
+    for oid, name, items_json, payment in rows:
+        order_id = f"ORD-{oid}-{datetime.now().strftime('%H%M')}"
+        order_data = await notion_post(
+            "https://api.notion.com/v1/pages",
+            {"parent": {"database_id": NOTION_DB_ORDERS},
+             "properties": {"Order ID": {"title": [{"text": {"content": order_id}}]},
+                            "Customer Name": {"rich_text": [{"text": {"content": name}}]},
+                            "Payment Method": {"select": {"name": payment}},
+                            "Status": {"select": {"name": "Pending"}}}
+            }
+        )
+        if "id" not in order_data:
+            logging.error(f"❌ Failed to sync order {order_id}")
+            continue
+            
+        try:
+            items = json.loads(items_json)
+            for item in items:
+                item_name = item.get("name", "")
+                qty = int(item.get("qty", 1))
+                
+                # Cache ထဲကနေ တိုက်ရိုက်ဆွဲထုတ် (ပိုမြန်ပြီး သေချာစေရန်)
+                item_detail = MENU_CACHE.get(item_name.lower())
+                
+                if item_detail and NOTION_DB_LINE_ITEMS:
+                    await notion_post(
+                        "https://api.notion.com/v1/pages",
+                        {"parent": {"database_id": NOTION_DB_LINE_ITEMS},
+                         "properties": {"Line Item": {"title": [{"text": {"content": item_detail["name"]}}]},
+                                        "Quantity": {"number": qty},
+                                        # Page ID တွေဖြစ်လို့ Dash (.replace) ဖြုတ်စရာ မလိုတော့ပါ
+                                        "Item": {"relation": [{"id": item_detail["id"]}]},
+                                        "Orders": {"relation": [{"id": order_data["id"]}]}}
+                        }
+                    )
+        except Exception as e:
+            logging.error(f"Failed to sync line items for {order_id}: {e}")
+
+        async with aiosqlite.connect(DB_FILE) as db:
+            await db.execute("UPDATE orders_queue SET sync_status='done' WHERE id=?", (oid,))
+            await db.commit()
+            
+        await send_admin(f"✅ Synced {order_id}")
+
+# -------------------- AI HANDLE --------------------
+async def handle_ai(chat_id: str, text: str, bg: BackgroundTasks):
+    chat = get_chat(chat_id)
+    response = await asyncio.to_thread(chat.send_message, text)
+    loop = 0
+    
+    while response.function_calls and loop < 5:
+        loop += 1
+        results = []
+        for call in response.function_calls:
+            args = call.args or {}
+            result = {"status": "error", "message": "unknown"}
+            
+            try:
+                if call.name == "get_item":
+                    result = await get_item(args.get("name", ""))
+                elif call.name == "save_order":
+                    result = await save_order(args.get("name", ""), args.get("items", "[]"), args.get("payment", "COD"))
+                    reset_chat(chat_id)
+                    bg.add_task(sync_orders)
+                elif call.name == "cancel_order":
+                    result = await cancel_order(args.get("order_id", ""), chat_id)
+            except Exception as e:
+                logging.error(f"Function {call.name} error: {e}")
+                result = {"status": "error", "message": str(e)}
+                
+            results.append(types.Part.from_function_response(name=call.name, response={"result": result}))
+            
+        response = await asyncio.to_thread(chat.send_message, results)
+        
+    return response.text or "တောင်းပန်ပါတယ်ရှင်၊ မရနိုင်သေးပါဘူးနော်။"
+
+# -------------------- FASTAPI --------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await init_db()
+    await refresh_menu()
+    asyncio.create_task(telegram_worker())
+    
+    async def loop_tasks():
+        while True:
+            await asyncio.sleep(300)
+            await refresh_menu()
+            await sync_orders()
+            
+    asyncio.create_task(loop_tasks())
+    yield
+
+app = FastAPI(lifespan=lifespan)
+
 @app.post("/webhook")
 async def webhook(req: Request, bg: BackgroundTasks):
     data = await req.json()
-    message = data.get("message", {})
-    text = message.get("text")
-    chat_id = message.get("chat", {}).get("id")
-    if not text or not chat_id:
+    msg = data.get("message", {})
+    text = msg.get("text")
+    chat_id = str(msg.get("chat", {}).get("id"))
+    
+    if not text:
         return {"ok": True}
-
+        
     try:
-        if not CURRENT_MENU_LIST:
-            await update_menu_cache()
-        chat = get_or_create_chat(str(chat_id))
-        response = chat.send_message(text)
+        reply = await handle_ai(chat_id, text, bg)
+    except Exception as e:
+        logging.error(f"Webhook error: {e}")
+        reply = "ခဏလေး စောင့်ပေးပါဦးနော်၊ စနစ်ထဲမှာ အမှားတစ်ခု ရှိနေလို့ပါရှင်။"
+        
+    await send(chat_id, reply)
+    return {"ok": True}
 
-        loop_count = 0
-        while response.function_calls and loop_count < 5:
-            loop_count += 1
-            function_responses = []
-            for call in response.function_calls:
-                result = {"status": "error", "message": "Unknown error"}
-                try:
-                    args = call.args or {}
+# -------------------- RUN --------------------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT)
