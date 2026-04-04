@@ -1,6 +1,6 @@
+google-genai>=1.0.0
 fastapi
 uvicorn
-python-dotenv
 httpx
 aiosqlite
-google-genai
+python-dotenv
