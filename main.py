@@ -72,7 +72,7 @@ Critical Rules:
 Burmese_to_English = {
     "ကော်ဖီအေး": "Iced Coffee",
     "ကော်လာ": "Cola",
-    # ခင်ဗျားရဲ့ ဆိုင် Menu စာရင်း အပြည့်အစုံကို ဒီမှာ ဆက်ထည့်ပေးပါဗျာ
+    # ဒီမှာ ခင်ဗျားရဲ့ ဆိုင် Menu စာရင်း အပြည့်အစုံကို ဆက်ထည့်ပေးပါ
 }
 
 async def get_item(name: str):
@@ -216,13 +216,15 @@ async def cancel_order(order_id: str):
 def get_chat(chat_id: str):
     if chat_id not in user_sessions:
         user_sessions[chat_id] = ai_client.chats.create(
-            # မော်ဒယ်ကို 2.5 Flash ပြောင်းလိုက်ခြင်းက အကောင်းဆုံးနည်းလမ်းပါ
             model="gemini-2.5-flash", 
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt(),
-                # Python Function တွေကို တိုက်ရိုက်ထည့်လိုက်တာက SDK အသစ်မှာ အမှားအယွင်းအကင်းဆုံးပါ
                 tools=[get_item, save_order, cancel_order],
-                temperature=0.7
+                temperature=0.7,
+                # Force Mode ကို AUTO ထားပြီး Automatic Execution ကို handle_ai ထဲမှာ ပိတ်ပါမယ်
+                function_calling_config=types.FunctionCallingConfig(
+                    mode="AUTO" 
+                )
             )
         )
     return user_sessions[chat_id]
@@ -288,7 +290,6 @@ async def sync_orders():
                             "properties": {
                                 "Line Item": {"title": [{"text": {"content": item_detail["name"]}}]},
                                 "Quantity": {"number": qty},
-                                # Notion API မှာ Relation ချိတ်ရင် Dash ပါတဲ့ ID အတိုင်းပဲ ထားရပါမယ်
                                 "Item": {"relation": [{"id": item_detail["id"]}]},
                                 "Orders": {"relation": [{"id": order_data["id"]}]}
                             }
@@ -306,7 +307,15 @@ async def sync_orders():
 # -------------------- AI HANDLE --------------------
 async def handle_ai(chat_id: str, text: str, bg: BackgroundTasks):
     chat = get_chat(chat_id)
-    response = await asyncio.to_thread(chat.send_message, text)
+    
+    # 🔥 ဒီနေရာမှာ Automatic Function Calling ကို Disable လုပ်လိုက်ပါပြီ (Coroutines Error ရှင်းရန်)
+    response = await asyncio.to_thread(
+        chat.send_message, 
+        text,
+        config=types.GenerateContentConfig(
+            automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+        )
+    )
 
     loop = 0
     while response.function_calls and loop < 5:
@@ -337,7 +346,14 @@ async def handle_ai(chat_id: str, text: str, bg: BackgroundTasks):
                 )
             )
 
-        response = await asyncio.to_thread(chat.send_message, results)
+        # Result တွေကို AI ဆီ ပြန်ပို့ပြီး စကားပြန်ဆက်ခိုင်းခြင်း
+        response = await asyncio.to_thread(
+            chat.send_message, 
+            results,
+            config=types.GenerateContentConfig(
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True)
+            )
+        )
 
     return response.text or "တောင်းပန်ပါတယ်ရှင်၊ မရနိုင်သေးပါဘူးနော်။"
 
