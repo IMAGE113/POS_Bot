@@ -220,11 +220,8 @@ def get_chat(chat_id: str):
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt(),
                 tools=[get_item, save_order, cancel_order],
-                temperature=0.7,
-                # Force Mode ကို AUTO ထားပြီး Automatic Execution ကို handle_ai ထဲမှာ ပိတ်ပါမယ်
-                function_calling_config=types.FunctionCallingConfig(
-                    mode="AUTO" 
-                )
+                temperature=0.7
+                # အမှားဖြစ်စေတဲ့ function_calling_config ပိုဒ်ကို ဖြုတ်ထားပြီးပါပြီ
             )
         )
     return user_sessions[chat_id]
@@ -308,7 +305,7 @@ async def sync_orders():
 async def handle_ai(chat_id: str, text: str, bg: BackgroundTasks):
     chat = get_chat(chat_id)
     
-    # 🔥 ဒီနေရာမှာ Automatic Function Calling ကို Disable လုပ်လိုက်ပါပြီ (Coroutines Error ရှင်းရန်)
+    # Automatic Function Calling ကို ပိတ်ထားဆဲ ဖြစ်ပါတယ်
     response = await asyncio.to_thread(
         chat.send_message, 
         text,
