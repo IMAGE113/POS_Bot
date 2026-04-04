@@ -3,6 +3,7 @@ import json
 import asyncio
 import logging
 from datetime import datetime
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, BackgroundTasks
 from dotenv import load_dotenv
 import httpx
@@ -12,7 +13,23 @@ from google.genai import types
 
 # -------------------- SETUP --------------------
 load_dotenv()
-app = FastAPI()
+
+# 🛠️ FastAPI ရဲ့ Startup/Shutdown အတွက် Lifespan အသစ်ကို ပြင်ဆင်ထားပါတယ်
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup လုပ်ငန်းစဉ်များ
+    await init_db()
+    asyncio.create_task(telegram_worker())
+    asyncio.create_task(periodic_menu_refresh())
+    await update_menu_cache()
+    logging.info("✅ Server started and menu cache updated.")
+    
+    yield # ဒီနေရာမှာ Server က ပုံမှန်အလုပ်လုပ်နေမှာပါ
+    
+    # ပိတ်သွားရင် လုပ်မယ့်အလုပ်တွေ (ရှိရင် ဒီမှာ ထည့်နိုင်ပါတယ်)
+    logging.info("🛑 Server is shutting down.")
+
+app = FastAPI(lifespan=lifespan)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # -------------------- ENV VARIABLES --------------------
@@ -43,7 +60,7 @@ HEADERS = {
     "Notion-Version": "2022-06-28"
 }
 
-# 🛠️ v1beta အစား v1 ကို အတင်းသုံးခိုင်းဖို့ ဖြည့်စွက်ထားပါတယ်
+# 🛠️ Google GenAI Client
 ai_client = genai.Client(
     api_key=GEMINI_API_KEY,
     http_options={'api_version': 'v1'}
@@ -237,11 +254,12 @@ Rule: When users ask for an item in Burmese, match it with the closest available
 Tools: get_item, save_order, cancel_order
 """
 
+# 🛠️ ပြုပြင်ထားသော get_or_create_chat (types.ChatConfig ကို သုံးထားပါတယ်)
 def get_or_create_chat(chat_id: str):
     if chat_id not in user_sessions:
         user_sessions[chat_id] = ai_client.chats.create(
             model="gemini-1.5-flash",
-            config=types.GenerateContentConfig(
+            config=types.ChatConfig(
                 system_instruction=get_system_prompt(),
                 tools=[get_item, save_order, cancel_order],
                 temperature=0.7
@@ -258,15 +276,6 @@ async def periodic_menu_refresh(interval=300):
     while True:
         await update_menu_cache()
         await asyncio.sleep(interval)
-
-# -------------------- STARTUP --------------------
-@app.on_event("startup")
-async def startup_event():
-    await init_db()
-    asyncio.create_task(telegram_worker())
-    asyncio.create_task(periodic_menu_refresh())
-    await update_menu_cache()
-    logging.info("✅ Server started and menu cache updated.")
 
 # -------------------- WEBHOOK --------------------
 @app.post("/webhook")
@@ -308,7 +317,15 @@ async def webhook(req: Request, bg: BackgroundTasks):
                 except Exception as e:
                     logging.error(f"Function call error ({call.name}): {e}")
                     result = {"status": "error", "message": str(e)}
-                function_responses.append(types.Part.from_function_response(name=call.name, response={"result": result}))
+                
+                # 🛠️ Function response ပို့တဲ့ ပုံစံအသစ်
+                function_responses.append({
+                    "function_response": {
+                        "name": call.name,
+                        "response": {"result": result}
+                    }
+                })
+            
             response = chat.send_message(function_responses)
 
         reply = response.text or "⚠️ တောင်းပန်ပါတယ်ရှင့်၊ အခုလုပ်ဆောင်နိုင်သေးတာ မဟုတ်လို့ပါနော်။"
