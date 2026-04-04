@@ -72,10 +72,16 @@ Critical Rules:
 Burmese_to_English = {
     "ကော်ဖီအေး": "Iced Coffee",
     "ကော်လာ": "Cola",
-    # ဒီမှာ ခင်ဗျားရဲ့ ဆိုင် Menu စာရင်း အပြည့်အစုံကို ဆက်ထည့်ပေးပါဗျာ
+    # ခင်ဗျားရဲ့ ဆိုင် Menu စာရင်း အပြည့်အစုံကို ဒီမှာ ဆက်ထည့်ပေးပါဗျာ
 }
 
 async def get_item(name: str):
+    """
+    Check the menu item and its stock quantity.
+
+    Args:
+        name: The exact English name of the item.
+    """
     name = Burmese_to_English.get(name, name)
     name_lower = name.lower()
     
@@ -176,6 +182,14 @@ async def send_admin(text: str):
 
 # -------------------- ORDERS --------------------
 async def save_order(name: str, items: str, payment: str = "COD"):
+    """
+    Save the customer's order to the database.
+
+    Args:
+        name: Customer name.
+        items: JSON string of items ordered.
+        payment: Payment method.
+    """
     try:
         async with aiosqlite.connect(DB_FILE) as db:
             await db.execute(
@@ -189,60 +203,25 @@ async def save_order(name: str, items: str, payment: str = "COD"):
         return {"status": "error", "message": str(e)}
 
 async def cancel_order(order_id: str):
+    """
+    Request to cancel an existing order.
+
+    Args:
+        order_id: The ID of the order to cancel.
+    """
     await send_admin(f"Cancel request: {order_id}")
     return {"status": "requested"}
 
 # -------------------- AI SESSION --------------------
 def get_chat(chat_id: str):
     if chat_id not in user_sessions:
-        # ChatGPT ရဲ့ အကြံပေးချက်အတိုင်း fully-typed types.Tool object တွေ သုံးထားပါတယ်
-        tools_definition = [
-            types.Tool(
-                function_declarations=[
-                    types.FunctionDeclaration(
-                        name="get_item",
-                        description="Check the menu item and its stock quantity.",
-                        parameters=types.Schema(
-                            type="OBJECT",
-                            properties={
-                                "name": types.Schema(type="STRING", description="The exact English name of the item from the menu.")
-                            },
-                            required=["name"]
-                        )
-                    ),
-                    types.FunctionDeclaration(
-                        name="save_order",
-                        description="Save the customer's order to the database.",
-                        parameters=types.Schema(
-                            type="OBJECT",
-                            properties={
-                                "name": types.Schema(type="STRING", description="Customer name."),
-                                "items": types.Schema(type="STRING", description="JSON string of items ordered (e.g., '[{\"name\": \"Cola\", \"qty\": 1}]')."),
-                                "payment": types.Schema(type="STRING", description="Payment method, defaults to 'COD'.")
-                            },
-                            required=["name", "items"]
-                        )
-                    ),
-                    types.FunctionDeclaration(
-                        name="cancel_order",
-                        description="Request to cancel an existing order.",
-                        parameters=types.Schema(
-                            type="OBJECT",
-                            properties={
-                                "order_id": types.Schema(type="STRING", description="The ID of the order to cancel (e.g., 'ORD-1-1200').")
-                            },
-                            required=["order_id"]
-                        )
-                    )
-                ]
-            )
-        ]
-
         user_sessions[chat_id] = ai_client.chats.create(
-            model="gemini-1.5-flash",
+            # မော်ဒယ်ကို 2.5 Flash ပြောင်းလိုက်ခြင်းက အကောင်းဆုံးနည်းလမ်းပါ
+            model="gemini-2.5-flash", 
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt(),
-                tools=tools_definition,
+                # Python Function တွေကို တိုက်ရိုက်ထည့်လိုက်တာက SDK အသစ်မှာ အမှားအယွင်းအကင်းဆုံးပါ
+                tools=[get_item, save_order, cancel_order],
                 temperature=0.7
             )
         )
@@ -309,7 +288,7 @@ async def sync_orders():
                             "properties": {
                                 "Line Item": {"title": [{"text": {"content": item_detail["name"]}}]},
                                 "Quantity": {"number": qty},
-                                # ChatGPT အကြံပေးထားပေမဲ့ Notion API အရ Dash မဖြုတ်ဘဲ မူရင်း Format အတိုင်း ထားရပါမယ်
+                                # Notion API မှာ Relation ချိတ်ရင် Dash ပါတဲ့ ID အတိုင်းပဲ ထားရပါမယ်
                                 "Item": {"relation": [{"id": item_detail["id"]}]},
                                 "Orders": {"relation": [{"id": order_data["id"]}]}
                             }
@@ -349,7 +328,6 @@ async def handle_ai(chat_id: str, text: str, bg: BackgroundTasks):
                 logging.error(f"Function {call.name} error: {e}")
                 result = {"status": "error", "message": str(e)}
 
-            # SDK အသစ်တွင် types.Part သုံး၍ Function Response ပြန်ခြင်း
             results.append(
                 types.Part(
                     function_response=types.FunctionResponse(
