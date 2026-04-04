@@ -9,12 +9,11 @@ from dotenv import load_dotenv
 import httpx
 import aiosqlite
 from google import genai
-from google.genai import types
 
 # -------------------- SETUP --------------------
 load_dotenv()
 
-# 🛠️ FastAPI ရဲ့ Startup/Shutdown အတွက် Lifespan အသစ်ကို ပြင်ဆင်ထားပါတယ်
+# 🛠️ FastAPI ရဲ့ Startup/Shutdown အတွက် Lifespan အသစ်
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup လုပ်ငန်းစဉ်များ
@@ -26,7 +25,6 @@ async def lifespan(app: FastAPI):
     
     yield # ဒီနေရာမှာ Server က ပုံမှန်အလုပ်လုပ်နေမှာပါ
     
-    # ပိတ်သွားရင် လုပ်မယ့်အလုပ်တွေ (ရှိရင် ဒီမှာ ထည့်နိုင်ပါတယ်)
     logging.info("🛑 Server is shutting down.")
 
 app = FastAPI(lifespan=lifespan)
@@ -254,16 +252,16 @@ Rule: When users ask for an item in Burmese, match it with the closest available
 Tools: get_item, save_order, cancel_order
 """
 
-# 🛠️ ပြုပြင်ထားသော get_or_create_chat (types.ChatConfig ကို သုံးထားပါတယ်)
+# 🛠️ ပိုစိတ်ချရစေရန် types.ChatConfig အစား Python Dictionary သက်သက်ဖြင့် ပြင်ဆင်ထားပါသည်
 def get_or_create_chat(chat_id: str):
     if chat_id not in user_sessions:
         user_sessions[chat_id] = ai_client.chats.create(
             model="gemini-1.5-flash",
-            config=types.ChatConfig(
-                system_instruction=get_system_prompt(),
-                tools=[get_item, save_order, cancel_order],
-                temperature=0.7
-            )
+            config={
+                "system_instruction": get_system_prompt(),
+                "tools": [get_item, save_order, cancel_order],
+                "temperature": 0.7
+            }
         )
     return user_sessions[chat_id]
 
@@ -318,7 +316,7 @@ async def webhook(req: Request, bg: BackgroundTasks):
                     logging.error(f"Function call error ({call.name}): {e}")
                     result = {"status": "error", "message": str(e)}
                 
-                # 🛠️ Function response ပို့တဲ့ ပုံစံအသစ်
+                # Function response ပို့တဲ့ ပုံစံအသစ်
                 function_responses.append({
                     "function_response": {
                         "name": call.name,
