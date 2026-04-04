@@ -66,22 +66,16 @@ Critical Rules:
 1. When a user asks for an item in Burmese, you MUST identify which English item from the menu they want (use your hardcoded Burmese->English mapping).
 2. Call the `get_item` tool with the EXACT English name from the menu.
 3. If the user asks for something not related to the menu, politely explain that we don't have it.
-
-Tools: get_item, save_order, cancel_order
 """
 
 # -------------------- MENU & ITEMS --------------------
 Burmese_to_English = {
     "ကော်ဖီအေး": "Iced Coffee",
     "ကော်လာ": "Cola",
-    # ခင်ဗျားရဲ့ Mapping စာရင်းအပြည့်အစုံကို ဒီမှာ ထည့်ပေးပါ
+    # ဒီမှာ ခင်ဗျားရဲ့ ဆိုင် Menu စာရင်း အပြည့်အစုံကို ဆက်ထည့်ပေးပါဗျာ
 }
 
 async def get_item(name: str):
-    """
-    AI က ပို့ပေးလိုက်တဲ့ English Name နဲ့ Menu Cache ထဲမှာ တိုက်စစ်မယ်။
-    """
-    # Map Burmese name to English if exists
     name = Burmese_to_English.get(name, name)
     name_lower = name.lower()
     
@@ -194,53 +188,61 @@ async def save_order(name: str, items: str, payment: str = "COD"):
         logging.error(f"Save order error: {e}")
         return {"status": "error", "message": str(e)}
 
-async def cancel_order(order_id: str, chat_id: str):
-    await send_admin(f"Cancel request: {order_id} from {chat_id}")
+async def cancel_order(order_id: str):
+    await send_admin(f"Cancel request: {order_id}")
     return {"status": "requested"}
 
 # -------------------- AI SESSION --------------------
 def get_chat(chat_id: str):
     if chat_id not in user_sessions:
-        # SDK မှာ Error မတက်အောင် dictionary format တိုက်ရိုက်သုံးထားပါတယ်
-        functions_declaration = [
-            {
-                "name": "get_item",
-                "description": "Check menu item and stock",
-                "parameters": {
-                    "type": "OBJECT",
-                    "properties": {"name": {"type": "STRING"}},
-                    "required": ["name"]
-                }
-            },
-            {
-                "name": "save_order",
-                "description": "Save customer order",
-                "parameters": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "name": {"type": "STRING"},
-                        "items": {"type": "STRING"},
-                        "payment": {"type": "STRING"}
-                    },
-                    "required": ["name", "items"]
-                }
-            },
-            {
-                "name": "cancel_order",
-                "description": "Cancel existing order",
-                "parameters": {
-                    "type": "OBJECT",
-                    "properties": {"order_id": {"type": "STRING"}},
-                    "required": ["order_id"]
-                }
-            }
+        # ChatGPT ရဲ့ အကြံပေးချက်အတိုင်း fully-typed types.Tool object တွေ သုံးထားပါတယ်
+        tools_definition = [
+            types.Tool(
+                function_declarations=[
+                    types.FunctionDeclaration(
+                        name="get_item",
+                        description="Check the menu item and its stock quantity.",
+                        parameters=types.Schema(
+                            type="OBJECT",
+                            properties={
+                                "name": types.Schema(type="STRING", description="The exact English name of the item from the menu.")
+                            },
+                            required=["name"]
+                        )
+                    ),
+                    types.FunctionDeclaration(
+                        name="save_order",
+                        description="Save the customer's order to the database.",
+                        parameters=types.Schema(
+                            type="OBJECT",
+                            properties={
+                                "name": types.Schema(type="STRING", description="Customer name."),
+                                "items": types.Schema(type="STRING", description="JSON string of items ordered (e.g., '[{\"name\": \"Cola\", \"qty\": 1}]')."),
+                                "payment": types.Schema(type="STRING", description="Payment method, defaults to 'COD'.")
+                            },
+                            required=["name", "items"]
+                        )
+                    ),
+                    types.FunctionDeclaration(
+                        name="cancel_order",
+                        description="Request to cancel an existing order.",
+                        parameters=types.Schema(
+                            type="OBJECT",
+                            properties={
+                                "order_id": types.Schema(type="STRING", description="The ID of the order to cancel (e.g., 'ORD-1-1200').")
+                            },
+                            required=["order_id"]
+                        )
+                    )
+                ]
+            )
         ]
 
         user_sessions[chat_id] = ai_client.chats.create(
             model="gemini-1.5-flash",
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt(),
-                tools=functions_declaration,
+                tools=tools_definition,
                 temperature=0.7
             )
         )
@@ -296,10 +298,7 @@ async def sync_orders():
                 item_name = item.get("name", "")
                 qty = int(item.get("qty", 1))
                 
-                # ၁။ Mapping ဖြတ်မယ်
                 eng_name = Burmese_to_English.get(item_name, item_name)
-                
-                # ၂။ Cache ထဲကနေ တိုက်ရိုက်ဆွဲထုတ် (ပိုမြန်စေရန်)
                 item_detail = MENU_CACHE.get(eng_name.lower())
 
                 if item_detail and NOTION_DB_LINE_ITEMS:
@@ -310,7 +309,7 @@ async def sync_orders():
                             "properties": {
                                 "Line Item": {"title": [{"text": {"content": item_detail["name"]}}]},
                                 "Quantity": {"number": qty},
-                                # Notion ID ဖြစ်လို့ .replace("-", "") မလိုပါ
+                                # ChatGPT အကြံပေးထားပေမဲ့ Notion API အရ Dash မဖြုတ်ဘဲ မူရင်း Format အတိုင်း ထားရပါမယ်
                                 "Item": {"relation": [{"id": item_detail["id"]}]},
                                 "Orders": {"relation": [{"id": order_data["id"]}]}
                             }
@@ -345,12 +344,20 @@ async def handle_ai(chat_id: str, text: str, bg: BackgroundTasks):
                     reset_chat(chat_id)
                     bg.add_task(sync_orders)
                 elif call.name == "cancel_order":
-                    result = await cancel_order(args.get("order_id", ""), chat_id)
+                    result = await cancel_order(args.get("order_id", ""))
             except Exception as e:
                 logging.error(f"Function {call.name} error: {e}")
                 result = {"status": "error", "message": str(e)}
 
-            results.append(types.Part.from_function_response(name=call.name, response={"result": result}))
+            # SDK အသစ်တွင် types.Part သုံး၍ Function Response ပြန်ခြင်း
+            results.append(
+                types.Part(
+                    function_response=types.FunctionResponse(
+                        name=call.name,
+                        response={"result": result}
+                    )
+                )
+            )
 
         response = await asyncio.to_thread(chat.send_message, results)
 
