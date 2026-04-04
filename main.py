@@ -299,4 +299,4 @@ async def webhook(req: Request, bg: BackgroundTasks):
             for call in response.function_calls:
                 result = {"status": "error", "message": "Unknown error"}
                 try:
-                    args = call.args or
+                    args = call.args or {}
